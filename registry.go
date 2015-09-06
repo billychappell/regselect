@@ -1,3 +1,4 @@
+// +build windows
 package regselect
 
 import (
@@ -9,25 +10,21 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-// Property holds the name, type and value of a registry variable that you wish
-// to configure. Once you have changed the value of a Property with this package,
-// the previous value is also stored  .
+// Property contains the name, type, value and previous value located within the
+// current key. The registry is updated using the Value field after recording its
+// pre-op value in the PrevValue field whenever the Set() method is called.
 type Property struct {
 	Name      string
-	Type      ValType
+	Type      string
 	Value     interface{}
 	PrevValue interface{}
 }
 
-// ValType is used to determine which method to use when getting or changing the
-// value of a Property.
-type ValType string
-
-// Key stores related properties that share the same scope and path.
+// Key uses the Path and Scope fields when opening a particular key from the registry.
+// Properties lists all the values you want to change within a given key.
 type Key struct {
-	Path       string
-	Scope      string
-	Properties []Property
+	Path, Scope string
+	Properties  []Property
 }
 
 // GetScope() returns a scope's corresponding const value for use with
@@ -47,139 +44,135 @@ func (k *Key) GetScope() registry.Key {
 	default:
 		return registry.LOCAL_MACHINE
 	}
-
 }
 
 // Config is the base struct that we use to Unmarshal JSON config files
 // into a Go-readable data structure.
 type Config []Key
 
-// Unmarshal accepts a JSON filename as an argument and returns a Config struct
-// to use for editing values from the registry.
-func Unmarshal(filename string) (c Config, err error) {
-	dat, err := ioutil.ReadFile(filename)
-	if err != nil {
-		return c, err
+// Validate() is a method implemented by the Config struct that attempts to
+// retrieve the value of each property for each key in a Config. Each Property's
+// PrevValue field is updated to its current value. This should be called before
+// Set() but not after Write() is implemented.
+func (c *Config) Validate() (err error) {
+	con := *c
+	for i, v := range con {
+		k, err := registry.OpenKey(v.GetScope(), v.Path, registry.ALL_ACCESS)
+		if err != nil {
+			return err
+		}
+		defer k.Close()
+		for n, p := range v.Properties {
+			val := &con[i].Properties[n].PrevValue
+			switch p.Type {
+			case "DWord", "QWord":
+				if s, _, err := k.GetIntegerValue(p.Name); err == nil {
+					*val = s
+				} else {
+					return err
+				}
+			case "String":
+				if s, _, err := k.GetStringValue(p.Name); err == nil {
+					*val = s
+				} else {
+					return err
+				}
+			case "Strings":
+				if s, _, err := k.GetStringsValue(p.Name); err == nil {
+					*val = s
+				} else {
+					return err
+				}
+			case "Binary":
+				if s, _, err := k.GetBinaryValue(p.Name); err == nil {
+					*val = s
+				} else {
+					return err
+				}
+			default:
+				var buf []byte
+				if _, _, err := k.GetValue(p.Name, buf); err != nil {
+					return err
+				}
+				return fmt.Errorf("%s of %s path in %s scope returned code %d.") // TODO: Convert const int representation of value types to explicitly match what the user should type into their JSON config.
+			}
+		}
 	}
-
-	err = json.Unmarshal(dat, &c)
-	if err != nil {
-		return c, err
-	}
-
-	return c, nil
+	return nil
 }
 
-// Write creates a JSON file using a Config. Filename is passed as the only
-// argument. This method is particularly useful for updating a config file with
-// each Property's prevValue after a recent change.
-func (c Config) Write(filename string) error {
+// Set() writes the JSON config to the registry. Make sure you call Validate() before calling Set() to
+// avoid filling values with the wrong type. For now, errors are handled by stopping mid-operation. Looking
+// at possibly reverting all values back to prev values or providing more detailed data to users/letting them
+// choose.
+func (c *Config) Set() (err error) {
+	for _, v := range *c {
+		k, err := registry.OpenKey(v.GetScope(), v.Path, registry.ALL_ACCESS)
+		if err != nil {
+			return err
+		}
+		defer k.Close()
+
+		for _, p := range v.Properties {
+			switch p.Type {
+			case "DWord":
+				if err := k.SetDWordValue(p.Name, uint32(p.Value.(float64))); err != nil {
+					return err
+				}
+			case "QWord":
+				if err := k.SetQWordValue(p.Name, uint64(p.Value.(float64))); err != nil {
+					return err
+				}
+			case "String":
+				if err := k.SetStringValue(p.Name, p.Value.(string)); err != nil {
+					return err
+				}
+			case "Strings":
+				if err := k.SetStringsValue(p.Name, p.Value.([]string)); err != nil {
+					return err
+				}
+			case "Binary":
+				if err := k.SetBinaryValue(p.Name, p.Value.([]byte)); err != nil {
+					return err
+				}
+			default:
+				return fmt.Errorf("please check the type of %s in %s is correctly set. Currently: %s", p.Name, v.Path, p.Type)
+			}
+		}
+	}
+	return nil
+}
+
+// Write() outputs the current Config to filename in JSON format.
+// Usually, you should call this method anytime you use Set() to
+// save your pre-op registry values in the PrevValue field equivalent.
+func (c *Config) Write(filename string) (err error) {
 	b, err := json.Marshal(c)
 	if err != nil {
-		return fmt.Errorf("Unable to marshal into JSON: \n %v", err)
+		return err
 	}
 
 	file, err := os.Create(filename)
 	if err != nil {
-		return fmt.Errorf("Unable to create file, %s: \n %v", filename, err)
+		return err
+	}
+	if _, err := file.Write(b); err != nil {
+		return err
 	}
 
-	_, err = file.Write(b)
+	return nil
+}
+
+// Unmarshal accepts a JSON filename as an argument and returns a Config struct
+// to use for editing values from the registry.
+func Unmarshal(filename string) (c *Config, err error) {
+	dat, err := ioutil.ReadFile(filename)
 	if err != nil {
-		return fmt.Errorf("Unable to write to file %s: \n %v", filename, err)
+		return c, err
+	}
+	if err = json.Unmarshal(dat, &c); err != nil {
+		return c, err
 	}
 
-	return nil
-}
-
-func (p *Property) getError(err error) error {
-	return fmt.Errorf("can't get %s value for %s: \n %v", p.Type, p.Name, err)
-}
-
-func (p *Property) setError(err error) error {
-	return fmt.Errorf("can't set %s value to %v for %s: \n %v", p.Type, p.Value, p.Name, err)
-}
-
-// Set is a method implemented by Registry to configure the Windows registry
-// according to the desired settings, while storing the previous values.
-func (c Config) Set() error {
-	for i, key := range c {
-		k, err := registry.OpenKey(key.GetScope(), key.Path, registry.ALL_ACCESS)
-		if err != nil {
-			return err
-		}
-		for n, prop := range key.Properties {
-			switch prop.Type {
-			case "DWord":
-				// First store the current val in prop.PrevVal,
-				s, _, err := k.GetIntegerValue(prop.Name)
-				if err != nil {
-					return prop.getError(err)
-				}
-				c[i].Properties[n].PrevValue = s
-
-				// Then set prop.Value to the current registry value.
-				err = k.SetDWordValue(prop.Name, uint32(prop.Value.(float64)))
-				if err != nil {
-					return prop.setError(err)
-				}
-			case "QWord":
-				// First store the current val in prop.PrevVal,
-				s, _, err := k.GetIntegerValue(prop.Name)
-				if err != nil {
-					return prop.getError(err)
-				}
-				c[i].Properties[n].PrevValue = s
-
-				// Then set prop.Value to the current registry value.
-				err = k.SetQWordValue(prop.Name, uint64(prop.Value.(float64)))
-				if err != nil {
-					return prop.setError(err)
-				}
-			case "String":
-				// First store the current val in prop.PrevVal,
-				s, _, err := k.GetStringValue(prop.Name)
-				if err != nil {
-					return prop.getError(err)
-				}
-				c[i].Properties[n].PrevValue = s
-
-				// Then set prop.Value to the current registry value.
-				err = k.SetStringValue(prop.Name, prop.Value.(string))
-				if err != nil {
-					return prop.setError(err)
-				}
-			case "Strings":
-				// First store the current val in prop.PrevVal,
-				s, _, err := k.GetStringsValue(prop.Name)
-				if err != nil {
-					return prop.getError(err)
-				}
-				c[i].Properties[n].PrevValue = s
-
-				// Then set prop.Value to the current registry value.
-				err = k.SetStringsValue(prop.Name, prop.Value.([]string))
-				if err != nil {
-					return prop.setError(err)
-				}
-			case "Binary":
-				// First store the current val in prop.PrevVal,
-				s, _, err := k.GetBinaryValue(prop.Name)
-				if err != nil {
-					return prop.getError(err)
-				}
-				c[i].Properties[n].PrevValue = s
-
-				// Then set prop.Value to the current registry value.
-				err = k.SetBinaryValue(prop.Name, prop.Value.([]byte))
-				if err != nil {
-					return prop.setError(err)
-				}
-			default:
-				return fmt.Errorf("please check the prop.Type is of the ValType type and try again")
-			}
-		}
-		k.Close()
-	}
-	return nil
+	return c, nil
 }
