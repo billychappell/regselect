@@ -28,7 +28,10 @@ Example:
 			]
 		}
 	]
-	Schema:
+```
+
+Schema:
+```
 	{
 	  "$schema": "http://json-schema.org/draft-04/schema#",
 	  "id": "/",
@@ -77,4 +80,5 @@ Example:
 	  "required": [
 	    "2"
 	  ]
-	} 
+	}
+```
