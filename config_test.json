@@ -1,0 +1,23 @@
+[
+	{
+		"path": "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+		"scope": "CURRENT_USER",
+		"properties": [
+			{
+				"name": "ProxyEnable",
+				"type": "DWord",
+				"value": 0
+			},
+			{
+				"name": "ProxyServer",
+				"type": "String",
+				"value": ""
+			},
+			{
+				"name": "WarnOnIntranet",
+				"type": "DWord",
+				"value": 0
+			}
+		]
+	}
+]
